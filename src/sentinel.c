@@ -82,7 +82,7 @@ typedef struct sentinelAddr {
 #define SENTINEL_PING_PERIOD 1000
 
 static mstime_t sentinel_info_period = 10000;
-static mstime_t sentinel_ping_period = SENTINEL_PING_PERIOD;
+//static mstime_t sentinel_ping_period = SENTINEL_PING_PERIOD;
 static mstime_t sentinel_ask_period = 1000;
 static mstime_t sentinel_publish_period = 2000;
 static mstime_t sentinel_default_down_after = 30000;
@@ -273,6 +273,7 @@ struct sentinelState {
     char *sentinel_auth_user;    /* Username for ACLs AUTH against other sentinel. */
     int resolve_hostnames;       /* Support use of hostnames, assuming DNS is well configured. */
     int announce_hostnames;      /* Announce hostnames instead of IPs when we have them. */
+    int ping_period;             /* Ping period, in milliseconds. */
 } sentinel;
 
 /* A script execution job. */
@@ -474,6 +475,7 @@ const char *preMonitorCfgName[] = {
     "myid",
     "resolve-hostnames",
     "announce-hostnames"
+    "ping-period",
 };
 
 /* This function overwrites a few normal Redis config default with Sentinel
@@ -505,6 +507,7 @@ void initSentinel(void) {
     sentinel.announce_hostnames = SENTINEL_DEFAULT_ANNOUNCE_HOSTNAMES;
     memset(sentinel.myid,0,sizeof(sentinel.myid));
     server.sentinel_config = NULL;
+    sentinel.ping_period = SENTINEL_PING_PERIOD;
 }
 
 /* This function is for checking whether sentinel config file has been set,
@@ -2014,6 +2017,8 @@ const char *sentinelHandleConfiguration(char **argv, int argc) {
         ri->master_reboot_down_after_period = atoi(argv[2]);
         if (ri->master_reboot_down_after_period < 0)
             return "negative time parameter.";
+    } else if (!strcasecmp(argv[0],"ping-period")) {
+        sentinel.ping_period = atoi(argv[1]);
     } else {
         return "Unrecognized sentinel configuration statement.";
     }
@@ -2246,6 +2251,11 @@ void rewriteConfigSentinelOption(struct rewriteConfigState *state) {
         rewriteConfigMarkAsProcessed(state,"sentinel sentinel-pass");  
     }
 
+    if (sentinel.ping_period) {
+        line = sdscatprintf(sdsempty(), "sentinel ping-period %d", sentinel.ping_period);
+        rewriteConfigRewriteLine(state,"sentinel ping-period",line,1);
+    }
+
     dictReleaseIterator(di);
 
     /* NOTE: the purpose here is in case due to the state change, the config rewrite 
@@ -2267,6 +2277,7 @@ void rewriteConfigSentinelOption(struct rewriteConfigState *state) {
     rewriteConfigMarkAsProcessed(state,"sentinel known-sentinel");
     rewriteConfigMarkAsProcessed(state,"sentinel rename-command");
     rewriteConfigMarkAsProcessed(state,"sentinel master-reboot-down-after-period");
+    rewriteConfigMarkAsProcessed(state,"sentinel ping-period");
 }
 
 /* This function uses the config rewriting Redis engine in order to persist
@@ -2404,7 +2415,7 @@ void sentinelReconnectInstance(sentinelRedisInstance *ri) {
     instanceLink *link = ri->link;
     mstime_t now = mstime();
 
-    if (now - ri->link->last_reconn_time < sentinel_ping_period) return;
+    if (now - ri->link->last_reconn_time < sentinel.ping_period) return;
     ri->link->last_reconn_time = now;
 
     /* Commands connection. */
@@ -3150,7 +3161,7 @@ void sentinelSendPeriodicCommands(sentinelRedisInstance *ri) {
      * the configured 'down-after-milliseconds' time, but every second
      * anyway if 'down-after-milliseconds' is greater than 1 second. */
     ping_period = ri->down_after_period;
-    if (ping_period > sentinel_ping_period) ping_period = sentinel_ping_period;
+    if (ping_period > sentinel.ping_period) ping_period = sentinel.ping_period;
 
     /* Send INFO to masters and slaves, not sentinels. */
     if ((ri->flags & SRI_SENTINEL) == 0 &&
@@ -3208,6 +3219,8 @@ void sentinelConfigSetCommand(client *c) {
         sentinel.sentinel_auth_pass = sdslen(val->ptr) == 0 ?
             NULL : sdsdup(val->ptr);
         drop_conns = 1;
+    } else if (!strcasecmp(o->ptr, "ping-period")) {
+        sentinel.ping_period = atoi(val->ptr);
     } else {
         addReplyErrorFormat(c, "Invalid argument '%s' to SENTINEL CONFIG SET",
                             (char *) o->ptr);
@@ -3267,6 +3280,12 @@ void sentinelConfigGetCommand(client *c) {
     if (stringmatch(pattern, "sentinel-pass", 1)) {
         addReplyBulkCString(c, "sentinel-pass");
         addReplyBulkCString(c, sentinel.sentinel_auth_pass ? sentinel.sentinel_auth_pass : "");
+        matches++;
+    }
+
+    if (stringmatch(pattern, "ping-period", 1)) {
+        addReplyBulkCString(c,"ping-period");
+        addReplyBulkLongLong(c, sentinel.ping_period);
         matches++;
     }
 
@@ -3510,7 +3529,7 @@ void sentinelSetDebugConfigParameters(client *c){
                 badarg = j;
                 goto badfmt;
             }
-            sentinel_ping_period = ll;
+            sentinel.ping_period = ll;
 
         } else if (!strcasecmp(option,"ask-period") && moreargs > 0) {
             /* ask-period <milliseconds> */
@@ -3639,7 +3658,7 @@ void addReplySentinelDebugInfo(client *c) {
     fields++;
 
     addReplyBulkCString(c,"PING-PERIOD");
-    addReplyBulkLongLong(c,sentinel_ping_period);
+    addReplyBulkLongLong(c,sentinel.ping_period);
     fields++;
 
     addReplyBulkCString(c,"ASK-PERIOD");
@@ -4966,14 +4985,14 @@ sentinelRedisInstance *sentinelSelectSlave(sentinelRedisInstance *master) {
 
         if (slave->flags & (SRI_S_DOWN|SRI_O_DOWN)) continue;
         if (slave->link->disconnected) continue;
-        if (mstime() - slave->link->last_avail_time > sentinel_ping_period*5) continue;
+        if (mstime() - slave->link->last_avail_time > sentinel.ping_period*5) continue;
         if (slave->slave_priority == 0) continue;
 
         /* If the master is in SDOWN state we get INFO for slaves every second.
          * Otherwise we get it with the usual period so we need to account for
          * a larger delay. */
         if (master->flags & SRI_S_DOWN)
-            info_validity_time = sentinel_ping_period*5;
+            info_validity_time = sentinel.ping_period*5;
         else
             info_validity_time = sentinel_info_period*3;
         if (mstime() - slave->info_refresh > info_validity_time) continue;

@@ -273,6 +273,7 @@ struct sentinelState {
     char *sentinel_auth_user;    /* Username for ACLs AUTH against other sentinel. */
     int resolve_hostnames;       /* Support use of hostnames, assuming DNS is well configured. */
     int announce_hostnames;      /* Announce hostnames instead of IPs when we have them. */
+    int dmitry;
 } sentinel;
 
 /* A script execution job. */
@@ -474,6 +475,7 @@ const char *preMonitorCfgName[] = {
     "myid",
     "resolve-hostnames",
     "announce-hostnames"
+    "dmitry"
 };
 
 /* This function overwrites a few normal Redis config default with Sentinel
@@ -505,6 +507,7 @@ void initSentinel(void) {
     sentinel.announce_hostnames = SENTINEL_DEFAULT_ANNOUNCE_HOSTNAMES;
     memset(sentinel.myid,0,sizeof(sentinel.myid));
     server.sentinel_config = NULL;
+    sentinel.dmitry = 1;
 }
 
 /* This function is for checking whether sentinel config file has been set,
@@ -2014,6 +2017,8 @@ const char *sentinelHandleConfiguration(char **argv, int argc) {
         ri->master_reboot_down_after_period = atoi(argv[2]);
         if (ri->master_reboot_down_after_period < 0)
             return "negative time parameter.";
+    } else if (!strcasecmp(argv[0],"dmitry")) {
+        sentinel.dmitry = atoi(argv[1]);
     } else {
         return "Unrecognized sentinel configuration statement.";
     }
@@ -2244,6 +2249,11 @@ void rewriteConfigSentinelOption(struct rewriteConfigState *state) {
         rewriteConfigRewriteLine(state,"sentinel sentinel-pass",line,1);
     } else {
         rewriteConfigMarkAsProcessed(state,"sentinel sentinel-pass");  
+    }
+
+    if (sentinel.dmitry) {
+        line = sdscatprintf(sdsempty(), "sentinel dmitry %d", sentinel.dmitry);
+        rewriteConfigRewriteLine(state,"sentinel dmitry",line,1);
     }
 
     dictReleaseIterator(di);
@@ -3208,6 +3218,8 @@ void sentinelConfigSetCommand(client *c) {
         sentinel.sentinel_auth_pass = sdslen(val->ptr) == 0 ?
             NULL : sdsdup(val->ptr);
         drop_conns = 1;
+    } else if (!strcasecmp(o->ptr, "dmitry")) {
+        sentinel.dmitry = atoi(val->ptr);
     } else {
         addReplyErrorFormat(c, "Invalid argument '%s' to SENTINEL CONFIG SET",
                             (char *) o->ptr);
@@ -3270,6 +3282,11 @@ void sentinelConfigGetCommand(client *c) {
         matches++;
     }
 
+    if (stringmatch(pattern, "dmitry", 1)) {
+        addReplyBulkCString(c,"dmitry");
+        addReplyBulkLongLong(c, sentinel.dmitry);
+        matches++;
+    }
     setDeferredMapLen(c, replylen, matches);
 }
 
